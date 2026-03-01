@@ -3064,6 +3064,11 @@
                                   childType === 'primary' ? 'primary_students' : 'kindergarten_students';
             
             const childDoc = await getDoc(doc(db, collectionName, childMatricule));
+
+             // Après avoir chargé tous les enfants
+if (currentParent && childrenList.length > 0) {
+    setupAllNotifications();
+}
             
             if (childDoc.exists()) {
                 const info = childDoc.data();
@@ -3095,6 +3100,7 @@
         setupPrimaryPeriods();
         setupHomeworkTabs();
         setupSubTabs();
+        setupAllNotifications();
         initCommuniqueSelectors();
     }
 
@@ -5850,6 +5856,428 @@ navigator.serviceWorker.addEventListener('message', (event) => {
     }
 }
 </style>
+
+<script>
+// ============================================
+// CONFIGURATION POUR TOUTES LES NOTIFICATIONS
+// ============================================
+async function setupAllNotifications() {
+  if (!currentParent || !childrenList.length) return;
+  
+  console.log('🔔 Configuration de TOUTES les notifications...');
+  
+  // INCIDENTS
+  setupIncidentNotifications();
+  
+  // PRÉSENCES
+  setupPresenceNotifications();
+  
+  // COTES ET NOTES
+  setupGradesNotifications();
+  
+  // DEVOIRS (tous niveaux)
+  setupHomeworkNotifications();
+  
+  // PAIEMENTS
+  setupPaymentNotifications();
+  
+  // COMMUNIQUÉS
+  setupCommuniqueNotifications();
+  
+  // EMPLOI DU TEMPS
+  setupTimetableNotifications();
+  
+  console.log('✅ Toutes les notifications configurées');
+}
+
+// ============================================
+// NOTIFICATIONS PRÉSENCES
+// ============================================
+function setupPresenceNotifications() {
+  childrenList.forEach(child => {
+    const queryPresence = query(
+      collection(db, 'student_attendance'),
+      where('studentId', '==', child.matricule),
+      where('published', '==', true),
+      orderBy('date', 'desc'),
+      limit(10)
+    );
+    
+    onSnapshot(queryPresence, (snapshot) => {
+      snapshot.docChanges().forEach(change => {
+        if (change.type === 'added') {
+          const presence = change.doc.data();
+          const today = new Date().toISOString().split('T')[0];
+          
+          // Notifier seulement pour aujourd'hui
+          if (presence.date === today) {
+            const statusEmoji = presence.status === 'present' ? '✅' : 
+                               presence.status === 'absent' ? '❌' : '⏰';
+            
+            sendPushNotification({
+              type: 'presence',
+              title: 'Présence',
+              body: `${child.fullName} est ${statusEmoji} ${presence.status}`,
+              childId: child.matricule,
+              childName: child.fullName,
+              status: presence.status,
+              date: presence.date,
+              page: 'presence-incidents'
+            });
+          }
+        }
+      });
+    });
+  });
+}
+
+// ============================================
+// NOTIFICATIONS COTES ET NOTES
+// ============================================
+function setupGradesNotifications() {
+  childrenList.forEach(child => {
+    if (child.type === 'secondary') {
+      const queryGrades = query(
+        collection(db, 'published_grades'),
+        where('className', '==', child.class),
+        orderBy('publishedAt', 'desc'),
+        limit(10)
+      );
+      
+      onSnapshot(queryGrades, (snapshot) => {
+        snapshot.docChanges().forEach(change => {
+          if (change.type === 'added') {
+            const grade = change.doc.data();
+            const studentGrade = grade.grades?.find(g => g.studentMatricule === child.matricule);
+            
+            if (studentGrade) {
+              sendPushNotification({
+                type: 'grade',
+                title: 'Nouvelle note',
+                body: `${child.fullName}: ${grade.subject} - ${studentGrade.grade}/${grade.maxPoints}`,
+                childId: child.matricule,
+                childName: child.fullName,
+                subject: grade.subject,
+                grade: studentGrade.grade,
+                maxPoints: grade.maxPoints,
+                period: grade.period,
+                page: 'grades'
+              });
+            }
+          }
+        });
+      });
+    }
+    
+    if (child.type === 'primary') {
+      const queryPrimaryGrades = query(
+        collection(db, 'primary_published_grades'),
+        where('studentId', '==', child.matricule),
+        orderBy('publishedAt', 'desc'),
+        limit(10)
+      );
+      
+      onSnapshot(queryPrimaryGrades, (snapshot) => {
+        snapshot.docChanges().forEach(change => {
+          if (change.type === 'added') {
+            const grade = change.doc.data();
+            
+            sendPushNotification({
+              type: 'grade',
+              title: 'Nouvelle cote primaire',
+              body: `${child.fullName}: ${grade.period}`,
+              childId: child.matricule,
+              childName: child.fullName,
+              period: grade.period,
+              page: 'grades'
+            });
+          }
+        });
+      });
+    }
+    
+    if (child.type === 'kindergarten') {
+      const queryKindergartenGrades = query(
+        collection(db, 'kindergarten_grades'),
+        where('studentId', '==', child.matricule),
+        orderBy('evaluationDate', 'desc'),
+        limit(10)
+      );
+      
+      onSnapshot(queryKindergartenGrades, (snapshot) => {
+        snapshot.docChanges().forEach(change => {
+          if (change.type === 'added') {
+            const grade = change.doc.data();
+            
+            sendPushNotification({
+              type: 'grade',
+              title: 'Nouvelle évaluation maternelle',
+              body: `${child.fullName}: ${grade.competence || 'Compétence'} - ${grade.level}`,
+              childId: child.matricule,
+              childName: child.fullName,
+              level: grade.level,
+              page: 'grades'
+            });
+          }
+        });
+      });
+    }
+  });
+}
+
+// ============================================
+// NOTIFICATIONS DEVOIRS
+// ============================================
+function setupHomeworkNotifications() {
+  childrenList.forEach(child => {
+    // Devoirs secondaire
+    if (child.type === 'secondary') {
+      const queryHomework = query(
+        collection(db, 'homework'),
+        where('className', '==', child.class),
+        orderBy('createdAt', 'desc'),
+        limit(10)
+      );
+      
+      onSnapshot(queryHomework, (snapshot) => {
+        snapshot.docChanges().forEach(change => {
+          if (change.type === 'added') {
+            const homework = change.doc.data();
+            const dueDate = homework.dueDate?.toDate().toLocaleDateString('fr-FR');
+            
+            sendPushNotification({
+              type: 'homework',
+              title: 'Nouveau devoir',
+              body: `${child.fullName}: ${homework.subject} - ${homework.title} (à rendre le ${dueDate})`,
+              childId: child.matricule,
+              childName: child.fullName,
+              subject: homework.subject,
+              title: homework.title,
+              dueDate: dueDate,
+              page: 'homework'
+            });
+          }
+        });
+      });
+    }
+    
+    // Devoirs maternelle (spécifique)
+    if (child.type === 'kindergarten') {
+      const queryKindergartenHomework = query(
+        collection(db, 'kindergarten_homework'),
+        where('className', '==', child.class),
+        where('published', '==', true),
+        orderBy('createdAt', 'desc'),
+        limit(10)
+      );
+      
+      onSnapshot(queryKindergartenHomework, (snapshot) => {
+        snapshot.docChanges().forEach(change => {
+          if (change.type === 'added') {
+            const homework = change.doc.data();
+            const hasAudio = !!homework.audioInfo?.url;
+            
+            sendPushNotification({
+              type: 'kindergarten_homework',
+              title: 'Nouvelle activité maternelle',
+              body: `${child.fullName}: ${homework.title}${hasAudio ? ' 📢 Avec message vocal' : ''}`,
+              childId: child.matricule,
+              childName: child.fullName,
+              title: homework.title,
+              hasAudio: hasAudio,
+              audioUrl: homework.audioInfo?.url,
+              page: 'homework',
+              level: 'kindergarten'
+            });
+          }
+        });
+      });
+    }
+  });
+}
+
+// ============================================
+// NOTIFICATIONS PAIEMENTS
+// ============================================
+function setupPaymentNotifications() {
+  childrenList.forEach(child => {
+    const queryPayments = query(
+      collection(db, 'payment_requests'),
+      where('studentId', '==', child.matricule),
+      where('status', '==', 'pending'),
+      orderBy('createdAt', 'desc'),
+      limit(10)
+    );
+    
+    onSnapshot(queryPayments, (snapshot) => {
+      snapshot.docChanges().forEach(change => {
+        if (change.type === 'added') {
+          const payment = change.doc.data();
+          
+          sendPushNotification({
+            type: 'payment',
+            title: 'Demande de paiement',
+            body: `${child.fullName}: ${payment.month} - ${payment.amount} FCFA`,
+            childId: child.matricule,
+            childName: child.fullName,
+            month: payment.month,
+            amount: payment.amount,
+            paymentCode: payment.paymentCode,
+            page: 'payments'
+          });
+        }
+      });
+    });
+  });
+}
+
+// ============================================
+// NOTIFICATIONS COMMUNIQUÉS
+// ============================================
+function setupCommuniqueNotifications() {
+  if (!currentParent) return;
+  
+  const queryCommuniques = query(
+    collection(db, 'parent_communique_relations'),
+    where('parentId', '==', currentParent.matricule),
+    orderBy('createdAt', 'desc'),
+    limit(10)
+  );
+  
+  onSnapshot(queryCommuniques, (snapshot) => {
+    snapshot.docChanges().forEach(async (change) => {
+      if (change.type === 'added') {
+        const relation = change.doc.data();
+        const communiqueDoc = await getDoc(doc(db, 'parent_communiques', relation.communiqueId));
+        
+        if (communiqueDoc.exists()) {
+          const communique = communiqueDoc.data();
+          const deadline = communique.deadline ? 
+            new Date(communique.deadline).toLocaleDateString('fr-FR') : 'Date limite';
+          
+          const now = new Date();
+          const deadlineDate = new Date(communique.deadline);
+          const daysLeft = Math.ceil((deadlineDate - now) / (1000 * 60 * 60 * 24));
+          
+          let title = 'Nouveau communiqué';
+          if (daysLeft <= 3 && daysLeft >= 0) {
+            title = '⚠️ COMMUNIQUÉ URGENT';
+          } else if (daysLeft < 0) {
+            title = '⏰ COMMUNIQUÉ EN RETARD';
+          }
+          
+          sendPushNotification({
+            type: 'communique',
+            title: title,
+            body: `${communique.feeType} - ${communique.amount} FCFA (limite: ${deadline})`,
+            communiqueId: change.doc.id,
+            feeType: communique.feeType,
+            amount: communique.amount,
+            deadline: deadline,
+            daysLeft: daysLeft,
+            page: 'communiques'
+          });
+        }
+      }
+    });
+  });
+}
+
+// ============================================
+// NOTIFICATIONS EMPLOI DU TEMPS
+// ============================================
+function setupTimetableNotifications() {
+  childrenList.forEach(child => {
+    const queryTimetable = query(
+      collection(db, 'class_schedules'),
+      where('className', '==', child.class),
+      orderBy('publishedAt', 'desc'),
+      limit(5)
+    );
+    
+    onSnapshot(queryTimetable, (snapshot) => {
+      snapshot.docChanges().forEach(change => {
+        if (change.type === 'added') {
+          const timetable = change.doc.data();
+          const publishedDate = timetable.publishedAt?.toDate().toLocaleDateString('fr-FR');
+          
+          sendPushNotification({
+            type: 'timetable',
+            title: 'Nouvel emploi du temps',
+            body: `${child.fullName}: Horaire pour ${timetable.month || ''} semaine ${timetable.week || ''}`,
+            childId: child.matricule,
+            childName: child.fullName,
+            month: timetable.month,
+            week: timetable.week,
+            publishedAt: publishedDate,
+            page: 'timetable'
+          });
+        }
+      });
+    });
+  });
+}
+
+// ============================================
+// ENVOI DES NOTIFICATIONS PUSH
+// ============================================
+async function sendPushNotification(notificationData) {
+  console.log('📨 Envoi notification:', notificationData);
+  
+  // 1. Sauvegarder dans l'historique local
+  const notifications = JSON.parse(localStorage.getItem('notifications') || '[]');
+  notifications.unshift({
+    id: `notif_${Date.now()}`,
+    ...notificationData,
+    read: false,
+    timestamp: new Date().toISOString()
+  });
+  
+  if (notifications.length > 50) notifications.length = 50;
+  localStorage.setItem('notifications', JSON.stringify(notifications));
+  
+  // 2. Mettre à jour le compteur
+  updateNotificationCount(1);
+  
+  // 3. Envoyer au Service Worker Firebase
+  if ('serviceWorker' in navigator && navigator.serviceWorker.controller) {
+    navigator.serviceWorker.controller.postMessage({
+      type: 'NOTIFICATION_RECEIVED',
+      data: notificationData
+    });
+  }
+  
+  // 4. Afficher une notification locale si l'app est ouverte
+  if (!document.hidden && Notification.permission === 'granted') {
+    let title = notificationData.title;
+    switch(notificationData.type) {
+      case 'incident': title = `⚠️ ${title}`; break;
+      case 'presence': title = `📅 ${title}`; break;
+      case 'grade': title = `📊 ${title}`; break;
+      case 'homework': title = `📚 ${title}`; break;
+      case 'kindergarten_homework': title = `🎨 ${title}`; break;
+      case 'payment': title = `💰 ${title}`; break;
+      case 'communique': title = `📄 ${title}`; break;
+      case 'timetable': title = `⏰ ${title}`; break;
+    }
+    
+    new Notification(title, {
+      body: notificationData.body,
+      icon: '/icon-192x192.png',
+      badge: '/icon-72x72.png',
+      data: notificationData,
+      silent: false
+    });
+  }
+}
+
+// ============================================
+// INITIALISATION
+// ============================================
+// Appeler cette fonction après le chargement des enfants
+// Dans votre code existant, après loadParentData(), ajoutez :
+// setupAllNotifications();
+</script>
 
 </body>
 </html>
