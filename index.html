@@ -6277,6 +6277,845 @@ async function sendPushNotification(notificationData) {
 // Appeler cette fonction après le chargement des enfants
 // Dans votre code existant, après loadParentData(), ajoutez :
 // setupAllNotifications();
+
+
+// ============================================
+// NOTIFICATIONS POUR L'HISTORIQUE (ONGLET)
+// ============================================
+function saveNotificationToHistory(notificationData) {
+  // Charger les notifications existantes
+  let notifications = JSON.parse(localStorage.getItem('notifications_history') || '[]');
+  
+  // Créer la notification avec un ID unique
+  const newNotification = {
+    id: `notif_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
+    ...notificationData,
+    read: false,
+    timestamp: new Date().toISOString(),
+    deleted: false
+  };
+  
+  // Ajouter en tête de liste
+  notifications.unshift(newNotification);
+  
+  // Garder seulement les 100 dernières
+  if (notifications.length > 100) {
+    notifications = notifications.slice(0, 100);
+  }
+  
+  // Sauvegarder
+  localStorage.setItem('notifications_history', JSON.stringify(notifications));
+  
+  // Mettre à jour le compteur de notifications non lues
+  updateNotificationBadges();
+  
+  return newNotification.id;
+}
+
+// Mettre à jour les badges
+function updateNotificationBadges() {
+  const notifications = JSON.parse(localStorage.getItem('notifications_history') || '[]');
+  const unreadCount = notifications.filter(n => !n.read && !n.deleted).length;
+  
+  // Badge général
+  const badge = document.getElementById('notification-count');
+  if (badge) {
+    badge.textContent = unreadCount > 99 ? '99+' : unreadCount;
+    badge.classList.toggle('hidden', unreadCount === 0);
+  }
+  
+  // Badges par type
+  const types = ['incident', 'presence', 'grade', 'homework', 'payment', 'communique', 'timetable'];
+  types.forEach(type => {
+    const count = notifications.filter(n => n.type === type && !n.read && !n.deleted).length;
+    updateNotificationBadge(type, count);
+  });
+}
+
+// ============================================
+// VERSION CORRIGÉE DE TOUS LES ÉCOUTEURS
+// ============================================
+
+// INCIDENTS
+function setupIncidentNotifications() {
+  childrenList.forEach(child => {
+    const q = query(
+      collection(db, 'incidents'),
+      where('studentMatricule', '==', child.matricule),
+      orderBy('createdAt', 'desc'),
+      limit(20)
+    );
+    
+    onSnapshot(q, (snapshot) => {
+      snapshot.docChanges().forEach(change => {
+        if (change.type === 'added') {
+          const incident = change.doc.data();
+          const date = incident.createdAt?.toDate() || new Date();
+          
+          // Vérifier si déjà notifié
+          const notifKey = `notified_incident_${change.doc.id}`;
+          if (localStorage.getItem(notifKey)) return;
+          
+          const notificationData = {
+            type: 'incident',
+            title: '⚠️ Nouvel incident',
+            body: `${child.fullName}: ${incident.type || 'Incident'} - ${incident.description?.substring(0, 100) || ''}`,
+            childId: child.matricule,
+            childName: child.fullName,
+            incidentId: change.doc.id,
+            severity: incident.severity,
+            page: 'presence-incidents',
+            timestamp: date.toISOString()
+          };
+          
+          // Sauvegarder dans l'historique
+          saveNotificationToHistory(notificationData);
+          
+          // Marquer comme notifié
+          localStorage.setItem(notifKey, 'true');
+          
+          // Notification push
+          sendPushNotification(notificationData);
+        }
+      });
+    });
+  });
+}
+
+// PRÉSENCES
+function setupPresenceNotifications() {
+  childrenList.forEach(child => {
+    const q = query(
+      collection(db, 'student_attendance'),
+      where('studentId', '==', child.matricule),
+      where('published', '==', true),
+      orderBy('date', 'desc'),
+      limit(20)
+    );
+    
+    onSnapshot(q, (snapshot) => {
+      snapshot.docChanges().forEach(change => {
+        if (change.type === 'added') {
+          const presence = change.doc.data();
+          const today = new Date().toISOString().split('T')[0];
+          
+          // Notifier seulement pour aujourd'hui
+          if (presence.date === today) {
+            const notifKey = `notified_presence_${change.doc.id}`;
+            if (localStorage.getItem(notifKey)) return;
+            
+            const statusEmoji = presence.status === 'present' ? '✅' : 
+                               presence.status === 'absent' ? '❌' : '⏰';
+            
+            const notificationData = {
+              type: 'presence',
+              title: '📅 Présence du jour',
+              body: `${child.fullName} est ${statusEmoji} ${presence.status}`,
+              childId: child.matricule,
+              childName: child.fullName,
+              status: presence.status,
+              date: presence.date,
+              page: 'presence-incidents'
+            };
+            
+            saveNotificationToHistory(notificationData);
+            localStorage.setItem(notifKey, 'true');
+            sendPushNotification(notificationData);
+          }
+        }
+      });
+    });
+  });
+}
+
+// COTES SECONDAIRES
+function setupSecondaryGradesNotifications() {
+  childrenList.forEach(child => {
+    if (child.type !== 'secondary') return;
+    
+    const q = query(
+      collection(db, 'parent_grades'),
+      where('className', '==', child.class),
+      orderBy('publishedAt', 'desc'),
+      limit(20)
+    );
+    
+    onSnapshot(q, (snapshot) => {
+      snapshot.docChanges().forEach(change => {
+        if (change.type === 'added') {
+          const grade = change.doc.data();
+          const studentGrade = grade.grades?.find(g => g.studentMatricule === child.matricule);
+          
+          if (studentGrade) {
+            const notifKey = `notified_grade_${change.doc.id}`;
+            if (localStorage.getItem(notifKey)) return;
+            
+            const percentage = (studentGrade.grade / grade.maxPoints * 100).toFixed(1);
+            
+            const notificationData = {
+              type: 'grade',
+              title: '📊 Nouvelle note',
+              body: `${child.fullName}: ${grade.subject} - ${studentGrade.grade}/${grade.maxPoints} (${percentage}%)`,
+              childId: child.matricule,
+              childName: child.fullName,
+              subject: grade.subject,
+              grade: studentGrade.grade,
+              maxPoints: grade.maxPoints,
+              period: grade.period,
+              page: 'grades'
+            };
+            
+            saveNotificationToHistory(notificationData);
+            localStorage.setItem(notifKey, 'true');
+            sendPushNotification(notificationData);
+          }
+        }
+      });
+    });
+  });
+}
+
+// COTES PRIMAIRES
+function setupPrimaryGradesNotifications() {
+  childrenList.forEach(child => {
+    if (child.type !== 'primary') return;
+    
+    const q = query(
+      collection(db, 'primary_published_grades'),
+      where('studentId', '==', child.matricule),
+      orderBy('publishedAt', 'desc'),
+      limit(20)
+    );
+    
+    onSnapshot(q, (snapshot) => {
+      snapshot.docChanges().forEach(change => {
+        if (change.type === 'added') {
+          const grade = change.doc.data();
+          const notifKey = `notified_primary_grade_${change.doc.id}`;
+          if (localStorage.getItem(notifKey)) return;
+          
+          const notificationData = {
+            type: 'grade',
+            title: '📊 Nouvelles cotes primaires',
+            body: `${child.fullName}: Période ${grade.period}`,
+            childId: child.matricule,
+            childName: child.fullName,
+            period: grade.period,
+            page: 'grades'
+          };
+          
+          saveNotificationToHistory(notificationData);
+          localStorage.setItem(notifKey, 'true');
+          sendPushNotification(notificationData);
+        }
+      });
+    });
+  });
+}
+
+// COTES MATERNELLE
+function setupKindergartenGradesNotifications() {
+  childrenList.forEach(child => {
+    if (child.type !== 'kindergarten') return;
+    
+    const q = query(
+      collection(db, 'kindergarten_grades'),
+      where('studentId', '==', child.matricule),
+      orderBy('evaluationDate', 'desc'),
+      limit(20)
+    );
+    
+    onSnapshot(q, (snapshot) => {
+      snapshot.docChanges().forEach(change => {
+        if (change.type === 'added') {
+          const grade = change.doc.data();
+          const notifKey = `notified_kinder_grade_${change.doc.id}`;
+          if (localStorage.getItem(notifKey)) return;
+          
+          const levels = {
+            'excellent': '🌟 Excellent',
+            'tres_bien': '✨ Très bien',
+            'bien': '👍 Bien',
+            'suffisant': '👌 Suffisant',
+            'insuffisant': '📝 À améliorer'
+          };
+          
+          const notificationData = {
+            type: 'grade',
+            title: '🎨 Nouvelle évaluation',
+            body: `${child.fullName}: ${grade.competence || 'Compétence'} - ${levels[grade.level] || grade.level}`,
+            childId: child.matricule,
+            childName: child.fullName,
+            competence: grade.competence,
+            level: grade.level,
+            page: 'grades'
+          };
+          
+          saveNotificationToHistory(notificationData);
+          localStorage.setItem(notifKey, 'true');
+          sendPushNotification(notificationData);
+        }
+      });
+    });
+  });
+}
+
+// DEVOIRS SECONDAIRE
+function setupHomeworkNotifications() {
+  childrenList.forEach(child => {
+    if (child.type !== 'secondary') return;
+    
+    const q = query(
+      collection(db, 'homework'),
+      where('className', '==', child.class),
+      orderBy('createdAt', 'desc'),
+      limit(20)
+    );
+    
+    onSnapshot(q, (snapshot) => {
+      snapshot.docChanges().forEach(change => {
+        if (change.type === 'added') {
+          const homework = change.doc.data();
+          const notifKey = `notified_homework_${change.doc.id}`;
+          if (localStorage.getItem(notifKey)) return;
+          
+          const dueDate = homework.dueDate?.toDate().toLocaleDateString('fr-FR');
+          const now = new Date();
+          const due = homework.dueDate?.toDate() || now;
+          const daysLeft = Math.ceil((due - now) / (1000 * 60 * 60 * 24));
+          
+          let emoji = '📚';
+          if (daysLeft <= 0) emoji = '⚠️';
+          else if (daysLeft <= 2) emoji = '⏰';
+          
+          const notificationData = {
+            type: 'homework',
+            title: `${emoji} Nouveau devoir`,
+            body: `${child.fullName}: ${homework.subject} - ${homework.title} (à rendre le ${dueDate})`,
+            childId: child.matricule,
+            childName: child.fullName,
+            subject: homework.subject,
+            title: homework.title,
+            dueDate: dueDate,
+            daysLeft: daysLeft,
+            page: 'homework'
+          };
+          
+          saveNotificationToHistory(notificationData);
+          localStorage.setItem(notifKey, 'true');
+          sendPushNotification(notificationData);
+        }
+      });
+    });
+  });
+}
+
+// DEVOIRS MATERNELLE
+function setupKindergartenHomeworkNotifications() {
+  childrenList.forEach(child => {
+    if (child.type !== 'kindergarten') return;
+    
+    const q = query(
+      collection(db, 'kindergarten_homework'),
+      where('className', '==', child.class),
+      where('published', '==', true),
+      orderBy('createdAt', 'desc'),
+      limit(20)
+    );
+    
+    onSnapshot(q, (snapshot) => {
+      snapshot.docChanges().forEach(change => {
+        if (change.type === 'added') {
+          const homework = change.doc.data();
+          const notifKey = `notified_kinder_hw_${change.doc.id}`;
+          if (localStorage.getItem(notifKey)) return;
+          
+          const hasAudio = !!homework.audioInfo?.url;
+          const hasFile = !!homework.fileInfo?.url;
+          
+          let details = [];
+          if (hasAudio) details.push('🔊 Message vocal');
+          if (hasFile) details.push('📎 Fichier joint');
+          
+          const notificationData = {
+            type: 'homework',
+            title: '🎨 Nouvelle activité maternelle',
+            body: `${child.fullName}: ${homework.title}${details.length ? ' (' + details.join(', ') + ')' : ''}`,
+            childId: child.matricule,
+            childName: child.fullName,
+            title: homework.title,
+            hasAudio: hasAudio,
+            hasFile: hasFile,
+            page: 'homework',
+            level: 'kindergarten'
+          };
+          
+          saveNotificationToHistory(notificationData);
+          localStorage.setItem(notifKey, 'true');
+          sendPushNotification(notificationData);
+        }
+      });
+    });
+  });
+}
+
+// PAIEMENTS
+function setupPaymentNotifications() {
+  childrenList.forEach(child => {
+    const q = query(
+      collection(db, 'payment_requests'),
+      where('studentId', '==', child.matricule),
+      orderBy('createdAt', 'desc'),
+      limit(20)
+    );
+    
+    onSnapshot(q, (snapshot) => {
+      snapshot.docChanges().forEach(change => {
+        if (change.type === 'added') {
+          const payment = change.doc.data();
+          const notifKey = `notified_payment_${change.doc.id}`;
+          if (localStorage.getItem(notifKey)) return;
+          
+          const notificationData = {
+            type: 'payment',
+            title: '💰 Demande de paiement',
+            body: `${child.fullName}: ${payment.month} - ${payment.amount} FCFA`,
+            childId: child.matricule,
+            childName: child.fullName,
+            month: payment.month,
+            amount: payment.amount,
+            paymentCode: payment.paymentCode,
+            status: payment.status,
+            page: 'payments'
+          };
+          
+          saveNotificationToHistory(notificationData);
+          localStorage.setItem(notifKey, 'true');
+          sendPushNotification(notificationData);
+        }
+      });
+    });
+  });
+}
+
+// COMMUNIQUÉS
+function setupCommuniqueNotifications() {
+  if (!currentParent) return;
+  
+  const q = query(
+    collection(db, 'parent_communique_relations'),
+    where('parentId', '==', currentParent.matricule),
+    orderBy('createdAt', 'desc'),
+    limit(20)
+  );
+  
+  onSnapshot(q, (snapshot) => {
+    snapshot.docChanges().forEach(async (change) => {
+      if (change.type === 'added') {
+        const notifKey = `notified_communique_${change.doc.id}`;
+        if (localStorage.getItem(notifKey)) return;
+        
+        const relation = change.doc.data();
+        const communiqueDoc = await getDoc(doc(db, 'parent_communiques', relation.communiqueId));
+        
+        if (communiqueDoc.exists()) {
+          const communique = communiqueDoc.data();
+          const deadline = communique.deadline ? 
+            new Date(communique.deadline).toLocaleDateString('fr-FR') : 'Date limite';
+          
+          const now = new Date();
+          const deadlineDate = new Date(communique.deadline);
+          const daysLeft = Math.ceil((deadlineDate - now) / (1000 * 60 * 60 * 24));
+          
+          let emoji = '📄';
+          let title = 'Nouveau communiqué';
+          
+          if (daysLeft < 0) {
+            emoji = '⏰';
+            title = 'Communiqué en retard';
+          } else if (daysLeft <= 3) {
+            emoji = '⚠️';
+            title = 'Communiqué urgent';
+          }
+          
+          const notificationData = {
+            type: 'communique',
+            title: `${emoji} ${title}`,
+            body: `${communique.feeType} - ${communique.amount} FCFA (limite: ${deadline})`,
+            communiqueId: change.doc.id,
+            feeType: communique.feeType,
+            amount: communique.amount,
+            deadline: deadline,
+            daysLeft: daysLeft,
+            page: 'communiques'
+          };
+          
+          saveNotificationToHistory(notificationData);
+          localStorage.setItem(notifKey, 'true');
+          sendPushNotification(notificationData);
+        }
+      }
+    });
+  });
+}
+
+// EMPLOI DU TEMPS
+function setupTimetableNotifications() {
+  childrenList.forEach(child => {
+    const q = query(
+      collection(db, 'class_schedules'),
+      where('className', '==', child.class),
+      orderBy('publishedAt', 'desc'),
+      limit(10)
+    );
+    
+    onSnapshot(q, (snapshot) => {
+      snapshot.docChanges().forEach(change => {
+        if (change.type === 'added') {
+          const timetable = change.doc.data();
+          const notifKey = `notified_timetable_${change.doc.id}`;
+          if (localStorage.getItem(notifKey)) return;
+          
+          const publishedDate = timetable.publishedAt?.toDate().toLocaleDateString('fr-FR');
+          
+          const notificationData = {
+            type: 'timetable',
+            title: '⏰ Nouvel emploi du temps',
+            body: `${child.fullName}: Horaire pour ${timetable.month || ''} semaine ${timetable.week || ''}`,
+            childId: child.matricule,
+            childName: child.fullName,
+            month: timetable.month,
+            week: timetable.week,
+            publishedAt: publishedDate,
+            page: 'timetable'
+          };
+          
+          saveNotificationToHistory(notificationData);
+          localStorage.setItem(notifKey, 'true');
+          sendPushNotification(notificationData);
+        }
+      });
+    });
+  });
+}
+
+// ============================================
+// FONCTION D'AFFICHAGE DES NOTIFICATIONS CORRIGÉE
+// ============================================
+function displayNotifications(filter = 'all') {
+  const container = document.getElementById('notifications-list-container');
+  
+  // Charger les notifications
+  let notifications = JSON.parse(localStorage.getItem('notifications_history') || '[]');
+  
+  // Filtrer les supprimées
+  notifications = notifications.filter(n => !n.deleted);
+  
+  // Appliquer le filtre
+  if (filter !== 'all') {
+    notifications = notifications.filter(n => n.type === filter);
+  }
+  
+  if (notifications.length === 0) {
+    container.innerHTML = `
+      <div class="no-data">
+        <i class="fas fa-bell-slash fa-3x" style="color: #ddd; margin-bottom: 1rem;"></i>
+        <h3>Aucune notification</h3>
+        <p>Vous n'avez pas encore de notifications.</p>
+      </div>
+    `;
+    return;
+  }
+  
+  let html = '';
+  
+  notifications.forEach(notif => {
+    const date = new Date(notif.timestamp).toLocaleDateString('fr-FR', {
+      day: '2-digit', month: '2-digit', year: 'numeric',
+      hour: '2-digit', minute: '2-digit'
+    });
+    
+    // Icône selon le type
+    let icon = 'fa-bell';
+    let color = '#3498db';
+    
+    switch(notif.type) {
+      case 'incident':
+        icon = 'fa-exclamation-triangle';
+        color = '#e74c3c';
+        break;
+      case 'presence':
+        icon = 'fa-calendar-check';
+        color = '#27ae60';
+        break;
+      case 'grade':
+        icon = 'fa-chart-line';
+        color = '#9b59b6';
+        break;
+      case 'homework':
+        icon = 'fa-book-open';
+        color = '#f39c12';
+        break;
+      case 'payment':
+        icon = 'fa-money-bill-wave';
+        color = '#2ecc71';
+        break;
+      case 'communique':
+        icon = 'fa-newspaper';
+        color = '#e67e22';
+        break;
+      case 'timetable':
+        icon = 'fa-clock';
+        color = '#1abc9c';
+        break;
+    }
+    
+    html += `
+      <div class="notification-item ${notif.read ? 'read' : 'unread'}" 
+           data-id="${notif.id}"
+           style="background: ${notif.read ? 'white' : '#f0f7ff'}; 
+                  border-left: 4px solid ${color};
+                  margin-bottom: 1rem;
+                  padding: 1rem;
+                  border-radius: 8px;
+                  box-shadow: 0 2px 8px rgba(0,0,0,0.05);
+                  position: relative;">
+        
+        <div style="display: flex; align-items: center; gap: 1rem;">
+          <div style="background: ${color}20; padding: 0.8rem; border-radius: 50%;">
+            <i class="fas ${icon}" style="color: ${color}; font-size: 1.2rem;"></i>
+          </div>
+          
+          <div style="flex: 1;">
+            <div style="display: flex; justify-content: space-between; align-items: center;">
+              <strong style="font-size: 1.1rem; color: #2c3e50;">${notif.title}</strong>
+              <small style="color: #7f8c8d;">${date}</small>
+            </div>
+            
+            <p style="margin: 0.5rem 0; color: #34495e;">${notif.body}</p>
+            
+            ${notif.childName ? `
+              <small style="color: ${color};">
+                <i class="fas fa-child"></i> ${notif.childName}
+              </small>
+            ` : ''}
+          </div>
+        </div>
+        
+        <div style="display: flex; gap: 0.5rem; margin-top: 1rem; justify-content: flex-end; border-top: 1px solid #ecf0f1; padding-top: 1rem;">
+          ${!notif.read ? `
+            <button class="btn btn-success btn-sm" onclick="markAsRead('${notif.id}')">
+              <i class="fas fa-check"></i> Marquer lu
+            </button>
+          ` : ''}
+          
+          <button class="btn btn-info btn-sm" onclick="viewNotification('${notif.id}')">
+            <i class="fas fa-eye"></i> Voir
+          </button>
+          
+          <button class="btn btn-danger btn-sm" onclick="deleteNotificationPermanent('${notif.id}')">
+            <i class="fas fa-trash-alt"></i> Supprimer
+          </button>
+        </div>
+        
+        ${!notif.read ? `
+          <span style="position: absolute; top: 1rem; right: 1rem; background: ${color}; color: white; padding: 0.2rem 0.5rem; border-radius: 12px; font-size: 0.7rem;">
+            Nouveau
+          </span>
+        ` : ''}
+      </div>
+    `;
+  });
+  
+  container.innerHTML = html;
+}
+
+// ============================================
+// FONCTIONS DE GESTION DES NOTIFICATIONS
+// ============================================
+
+// Marquer comme lu
+window.markAsRead = function(notificationId) {
+  let notifications = JSON.parse(localStorage.getItem('notifications_history') || '[]');
+  const index = notifications.findIndex(n => n.id === notificationId);
+  
+  if (index !== -1 && !notifications[index].read) {
+    notifications[index].read = true;
+    localStorage.setItem('notifications_history', JSON.stringify(notifications));
+    
+    // Mettre à jour l'affichage
+    displayNotifications(document.getElementById('notification-filter').value);
+    
+    // Mettre à jour les badges
+    updateNotificationBadges();
+    
+    showToast('Notification marquée comme lue', 'success');
+  }
+};
+
+// Voir la notification
+window.viewNotification = function(notificationId) {
+  let notifications = JSON.parse(localStorage.getItem('notifications_history') || '[]');
+  const notification = notifications.find(n => n.id === notificationId);
+  
+  if (notification) {
+    // Marquer comme lu si ce n'est pas déjà fait
+    if (!notification.read) {
+      window.markAsRead(notificationId);
+    }
+    
+    // Naviguer vers la page
+    if (notification.page) {
+      const link = document.querySelector(`.nav-menu a[data-page="${notification.page}"]`);
+      if (link) {
+        link.click();
+        
+        // Si un enfant est spécifié, le sélectionner
+        if (notification.childId) {
+          setTimeout(() => {
+            let selector;
+            switch(notification.page) {
+              case 'grades':
+                selector = document.getElementById('secondary-grades-child-selector') ||
+                          document.getElementById('primary-grades-child-selector') ||
+                          document.getElementById('kindergarten-grades-child-selector');
+                break;
+              case 'presence-incidents':
+                selector = document.getElementById('presence-child-selector');
+                break;
+              case 'homework':
+                selector = document.getElementById('secondary-homework-child-selector') ||
+                          document.getElementById('primary-homework-child-selector') ||
+                          document.getElementById('kindergarten-homework-child-selector');
+                break;
+              case 'payments':
+                selector = document.getElementById('payment-child-selector');
+                break;
+              case 'timetable':
+                selector = document.getElementById('timetable-child-selector');
+                break;
+            }
+            
+            if (selector) {
+              selector.value = notification.childId;
+              selector.dispatchEvent(new Event('change'));
+            }
+          }, 500);
+        }
+      }
+    }
+    
+    showToast('Ouverture de la notification', 'info');
+  }
+};
+
+// Supprimer définitivement
+window.deleteNotificationPermanent = function(notificationId) {
+  if (!confirm('Voulez-vous vraiment supprimer définitivement cette notification ?')) {
+    return;
+  }
+  
+  let notifications = JSON.parse(localStorage.getItem('notifications_history') || '[]');
+  const index = notifications.findIndex(n => n.id === notificationId);
+  
+  if (index !== -1) {
+    // Marquer comme supprimée
+    notifications[index].deleted = true;
+    localStorage.setItem('notifications_history', JSON.stringify(notifications));
+    
+    // Mettre à jour l'affichage
+    displayNotifications(document.getElementById('notification-filter').value);
+    
+    // Mettre à jour les badges
+    updateNotificationBadges();
+    
+    showToast('Notification supprimée définitivement', 'success');
+  }
+};
+
+// Tout effacer
+window.clearAllNotifications = function() {
+  if (!confirm('Voulez-vous vraiment supprimer TOUTES les notifications ?')) return;
+  
+  let notifications = JSON.parse(localStorage.getItem('notifications_history') || '[]');
+  
+  // Marquer toutes comme supprimées
+  notifications.forEach(n => n.deleted = true);
+  localStorage.setItem('notifications_history', JSON.stringify(notifications));
+  
+  // Mettre à jour l'affichage
+  displayNotifications(document.getElementById('notification-filter').value);
+  
+  // Mettre à jour les badges
+  updateNotificationBadges();
+  
+  showToast('Toutes les notifications ont été supprimées', 'success');
+};
+
+// ============================================
+// FONCTION D'INITIALISATION COMPLÈTE
+// ============================================
+function setupAllNotifications() {
+  if (!currentParent || !childrenList.length) {
+    console.log('⏳ Attente des données parent...');
+    setTimeout(setupAllNotifications, 2000);
+    return;
+  }
+  
+  console.log('🔔 Configuration de TOUTES les notifications...');
+  
+  // Vider les anciennes clés de notification (optionnel)
+  // cleanupNotificationKeys();
+  
+  // Lancer tous les écouteurs
+  setupIncidentNotifications();
+  setupPresenceNotifications();
+  setupSecondaryGradesNotifications();
+  setupPrimaryGradesNotifications();
+  setupKindergartenGradesNotifications();
+  setupHomeworkNotifications();
+  setupKindergartenHomeworkNotifications();
+  setupPaymentNotifications();
+  setupCommuniqueNotifications();
+  setupTimetableNotifications();
+  
+  // Afficher les notifications existantes
+  displayNotifications('all');
+  
+  console.log('✅ Toutes les notifications configurées');
+}
+
+// ============================================
+// NETTOYAGE DES ANCIENNES CLÉS (optionnel)
+// ============================================
+function cleanupNotificationKeys() {
+  const keys = Object.keys(localStorage);
+  const notifKeys = keys.filter(k => k.startsWith('notified_'));
+  
+  // Garder seulement les 7 derniers jours
+  const sevenDaysAgo = Date.now() - (7 * 24 * 60 * 60 * 1000);
+  
+  notifKeys.forEach(key => {
+    try {
+      const timestamp = parseInt(key.split('_').pop());
+      if (timestamp && timestamp < sevenDaysAgo) {
+        localStorage.removeItem(key);
+      }
+    } catch (e) {
+      // Ignorer
+    }
+  });
+}
+
+// ============================================
+// APPEL DANS LOADPARENTDATA
+// ============================================
+// À AJOUTER À LA FIN DE LA FONCTION loadParentData()
+/*
+if (currentParent && childrenList.length > 0) {
+  setupAllNotifications();
+}
+*/
 </script>
 
 </body>
