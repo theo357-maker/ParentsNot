@@ -2585,17 +2585,33 @@
     // ============================================
     // AUTHENTIFICATION
     // ============================================
-    onAuthStateChanged(auth, async (user) => {
-        if (user) {
+    // ============================================
+// AUTHENTIFICATION CORRIGÉE
+// ============================================
+onAuthStateChanged(auth, async (user) => {
+    console.log('🔐 Auth state changed:', user?.uid);
+    
+    if (user) {
+        try {
+            console.log('🔍 Recherche parent avec uid:', user.uid);
             const q = query(collection(db, 'parents'), where('uid', '==', user.uid));
             const snap = await getDocs(q);
+            
             if (!snap.empty) {
-                currentParent = { id: snap.docs[0].id, ...snap.docs[0].data() };
+                currentParent = { 
+                    id: snap.docs[0].id, 
+                    ...snap.docs[0].data() 
+                };
                 
+                console.log('✅ Parent connecté:', currentParent);
+                console.log('👥 Enfants du parent:', currentParent.children);
+                
+                // Afficher l'application
                 document.getElementById('login-overlay').classList.add('hidden');
                 document.getElementById('app-root').classList.remove('hidden');
-                document.getElementById('parent-name').textContent = currentParent.fullName;
+                document.getElementById('parent-name').textContent = currentParent.fullName || 'Parent';
                 
+                // Photo
                 const photoContainer = document.getElementById('parent-photo-container');
                 if (currentParent.photoURL) {
                     photoContainer.innerHTML = `<img src="${currentParent.photoURL}" class="parent-photo" alt="Photo">`;
@@ -2604,22 +2620,38 @@
                     photoContainer.innerHTML = `<div class="parent-photo-placeholder"><i class="fas fa-user"></i></div>`;
                 }
                 
+                // Charger les notifications
                 loadNotificationsFromStorage();
+                
+                // CHARGER LES DONNÉES DES ENFANTS (essentiel)
                 await loadParentData();
+                
+                // Configurer les notifications temps réel
                 setupRealTimeNotifications();
                 
+                // Notifications push
                 if (currentParent.notificationEnabled) {
                     setupFirebaseMessaging();
                 }
+                
+                showToast('Connexion réussie', 'success');
             } else {
+                console.log('❌ Aucun parent trouvé avec cet uid');
                 await signOut(auth);
-                showAlert("Accès refusé", "error");
+                showAlert("Accès non autorisé", "error");
             }
-        } else {
-            document.getElementById('login-overlay').classList.remove('hidden');
-            document.getElementById('app-root').classList.add('hidden');
+        } catch (error) {
+            console.error('❌ Erreur auth:', error);
+            showAlert("Erreur de connexion", "error");
         }
-    });
+    } else {
+        // Déconnexion
+        document.getElementById('login-overlay').classList.remove('hidden');
+        document.getElementById('app-root').classList.add('hidden');
+        currentParent = null;
+        childrenList = [];
+    }
+});
 
     // ============================================
     // NOTIFICATIONS TEMPS RÉEL
@@ -3032,77 +3064,200 @@
 // ============================================
     // CHARGEMENT DES DONNÉES PARENT
     // ============================================
-    async function loadParentData() {
-        const selectors = {
-            general: [
-                'child-selector', 'presence-child-selector', 'payment-child-selector', 'timetable-child-selector'
-            ],
-            secondary: ['secondary-grades-child-selector', 'secondary-homework-child-selector'],
-            primary: ['primary-grades-child-selector', 'primary-homework-child-selector'],
-            kindergarten: ['kindergarten-grades-child-selector', 'kindergarten-homework-child-selector']
-        };
-        
-        // Réinitialiser tous les sélecteurs
-        Object.values(selectors).flat().forEach(id => {
-            const el = document.getElementById(id);
-            if (el) el.innerHTML = '<option value="">-- Sélectionner --</option>';
-        });
-        
-        if (!currentParent?.children) return;
-        
-        const added = new Set();
-        childrenList = [];
-        
-        for (const childData of currentParent.children) {
-            const childMatricule = childData.matricule || childData;
+    // ============================================
+// CHARGEMENT DES DONNÉES PARENT CORRIGÉ
+// ============================================
+async function loadParentData() {
+    console.log('📥 Chargement des données parent...');
+    
+    // IDs de tous les sélecteurs
+    const selectors = {
+        general: [
+            'child-selector', 
+            'presence-child-selector', 
+            'payment-child-selector', 
+            'timetable-child-selector',
+            'communique-child-selector'
+        ],
+        secondary: [
+            'secondary-grades-child-selector', 
+            'secondary-homework-child-selector'
+        ],
+        primary: [
+            'primary-grades-child-selector', 
+            'primary-homework-child-selector'
+        ],
+        kindergarten: [
+            'kindergarten-grades-child-selector', 
+            'kindergarten-homework-child-selector'
+        ]
+    };
+    
+    // Réinitialiser tous les sélecteurs
+    Object.values(selectors).flat().forEach(id => {
+        const el = document.getElementById(id);
+        if (el) {
+            el.innerHTML = '<option value="">-- Sélectionner --</option>';
+        } else {
+            console.warn(`⚠️ Sélecteur non trouvé: ${id}`);
+        }
+    });
+    
+    // Vérifier si le parent a des enfants
+    if (!currentParent || !currentParent.children || currentParent.children.length === 0) {
+        console.log('⚠️ Aucun enfant associé au parent');
+        document.getElementById('children-list-container').innerHTML = 
+            '<div class="alert alert-warning">Aucun enfant associé à votre compte</div>';
+        return;
+    }
+    
+    console.log(`👥 ${currentParent.children.length} enfant(s) à charger`);
+    
+    const added = new Set();
+    childrenList = [];
+    
+    // Parcourir tous les enfants
+    for (const childData of currentParent.children) {
+        try {
+            // CORRECTION: Gérer les différents formats possibles
+            let childMatricule;
+            let childType;
+            
+            if (typeof childData === 'object') {
+                childMatricule = childData.matricule;
+                childType = childData.type || 'secondary';
+            } else {
+                childMatricule = childData;
+                childType = 'secondary'; // Par défaut
+            }
+            
+            if (!childMatricule) {
+                console.warn('⚠️ Enfant sans matricule ignoré');
+                continue;
+            }
+            
             if (added.has(childMatricule)) continue;
             added.add(childMatricule);
             
-            const childType = childData.type || 'secondary';
+            console.log(`🔍 Recherche enfant ${childMatricule} (type: ${childType})`);
             
-            const collectionName = childType === 'secondary' ? 'students' :
-                                  childType === 'primary' ? 'primary_students' : 'kindergarten_students';
+            // CORRECTION: Si le type n'est pas spécifié, essayer de le déterminer
+            if (!childType || childType === 'secondary' || childType === 'unknown') {
+                // Essayer la collection secondaire d'abord
+                let docRef = await getDoc(doc(db, 'students', childMatricule));
+                if (docRef.exists()) {
+                    childType = 'secondary';
+                } else {
+                    // Essayer primaire
+                    docRef = await getDoc(doc(db, 'primary_students', childMatricule));
+                    if (docRef.exists()) {
+                        childType = 'primary';
+                    } else {
+                        // Essayer maternelle
+                        docRef = await getDoc(doc(db, 'kindergarten_students', childMatricule));
+                        if (docRef.exists()) {
+                            childType = 'kindergarten';
+                        }
+                    }
+                }
+            }
             
+            // Déterminer la collection en fonction du type
+            let collectionName;
+            if (childType === 'secondary') collectionName = 'students';
+            else if (childType === 'primary') collectionName = 'primary_students';
+            else if (childType === 'kindergarten') collectionName = 'kindergarten_students';
+            else {
+                console.warn(`⚠️ Type inconnu pour ${childMatricule}: ${childType}`);
+                continue;
+            }
+            
+            // Récupérer les données de l'enfant
             const childDoc = await getDoc(doc(db, collectionName, childMatricule));
-
-             // Après avoir chargé tous les enfants
-if (currentParent && childrenList.length > 0) {
-    setupAllNotifications();
-}
             
             if (childDoc.exists()) {
                 const info = childDoc.data();
-                const child = { matricule: childMatricule, type: childType, ...info };
+                const child = { 
+                    matricule: childMatricule, 
+                    type: childType,
+                    fullName: info.fullName || 'Nom inconnu',
+                    class: info.class || 'Classe inconnue',
+                    ...info 
+                };
+                
                 childrenList.push(child);
                 
-                const displayText = `${info.fullName} - ${info.class} (${childType})`;
+                const displayText = `${child.fullName} - ${child.class} (${childType})`;
+                console.log(`✅ Enfant trouvé: ${displayText}`);
                 
                 // Ajouter aux sélecteurs généraux
                 selectors.general.forEach(id => {
                     const el = document.getElementById(id);
-                    if (el) el.innerHTML += `<option value="${childMatricule}">${displayText}</option>`;
+                    if (el) {
+                        el.innerHTML += `<option value="${childMatricule}">${displayText}</option>`;
+                    }
                 });
                 
                 // Ajouter aux sélecteurs spécifiques
-                const target = selectors[childType === 'secondary' ? 'secondary' : 
-                                        childType === 'primary' ? 'primary' : 'kindergarten'];
-                target.forEach(id => {
-                    const el = document.getElementById(id);
-                    if (el) el.innerHTML += `<option value="${childMatricule}">${info.fullName} - ${info.class}</option>`;
-                });
+                if (childType === 'secondary') {
+                    selectors.secondary.forEach(id => {
+                        const el = document.getElementById(id);
+                        if (el) {
+                            el.innerHTML += `<option value="${childMatricule}">${child.fullName} - ${child.class}</option>`;
+                        }
+                    });
+                } else if (childType === 'primary') {
+                    selectors.primary.forEach(id => {
+                        const el = document.getElementById(id);
+                        if (el) {
+                            el.innerHTML += `<option value="${childMatricule}">${child.fullName} - ${child.class}</option>`;
+                        }
+                    });
+                } else if (childType === 'kindergarten') {
+                    selectors.kindergarten.forEach(id => {
+                        const el = document.getElementById(id);
+                        if (el) {
+                            el.innerHTML += `<option value="${childMatricule}">${child.fullName} - ${child.class}</option>`;
+                        }
+                    });
+                }
+            } else {
+                console.warn(`❌ Enfant non trouvé dans Firebase: ${childMatricule}`);
             }
+        } catch (error) {
+            console.error(`❌ Erreur chargement enfant:`, error);
         }
-        
-        updateChildrenPage();
-        updateProfileForm();
-        loadYearSelectors();
-        setupSecondaryGradesPeriods();
-        setupPrimaryPeriods();
-        setupHomeworkTabs();
-        setupSubTabs();
-        setupAllNotifications();
-        initCommuniqueSelectors();
     }
+    
+    console.log(`📊 Total enfants chargés: ${childrenList.length}`);
+    
+    // Mettre à jour les différentes sections
+    updateChildrenPage();
+    updateProfileForm();
+    loadYearSelectors();
+    setupSecondaryGradesPeriods();
+    setupPrimaryPeriods();
+    setupHomeworkTabs();
+    setupSubTabs();
+    
+    // CORRECTION IMPORTANTE: Initialiser le sélecteur de communiqués
+    initCommuniqueSelectors();
+    
+    // CORRECTION IMPORTANTE: Configurer les notifications APRÈS chargement
+    if (childrenList.length > 0) {
+        console.log('🔔 Démarrage des notifications...');
+        setupAllNotifications();
+    } else {
+        console.log('⚠️ Aucun enfant, pas de notifications');
+    }
+    
+    // Afficher un message de succès
+    if (childrenList.length === 0) {
+        showAlert('Aucun enfant trouvé. Vérifiez votre compte.', 'warning');
+    } else {
+        showToast(`${childrenList.length} enfant(s) chargé(s)`, 'success');
+    }
+}
 
     function updateChildrenPage() {
         const container = document.getElementById('children-list-container');
@@ -3142,7 +3297,8 @@ if (currentParent && childrenList.length > 0) {
         }
     }
 
-    function loadYearSelectors() {
+    function loadYearSelectors() 
+{
         const year = new Date().getFullYear();
         const select = document.getElementById('presence-year');
         select.innerHTML = '';
@@ -4123,13 +4279,38 @@ async function loadIncidentStats(studentId) {
     // ============================================
     // COMMUNIQUÉS
     // ============================================
-    function initCommuniqueSelectors() {
-        const selector = document.getElementById('communique-child-selector');
-        selector.innerHTML = '<option value="all">Tous mes enfants</option>';
-        childrenList.forEach(c => {
-            selector.innerHTML += `<option value="${c.matricule}">${c.fullName} - ${c.class}</option>`;
-        });
+    // ============================================
+// INITIALISATION SÉLECTEUR COMMUNIQUÉS CORRIGÉE
+// ============================================
+function initCommuniqueSelectors() {
+    console.log('📬 Initialisation sélecteur communiqués');
+    const selector = document.getElementById('communique-child-selector');
+    
+    if (!selector) {
+        console.error('❌ Sélecteur communiqués non trouvé');
+        return;
     }
+    
+    selector.innerHTML = '<option value="all">Tous mes enfants</option>';
+    
+    if (childrenList.length === 0) {
+        console.log('⚠️ Aucun enfant pour les communiqués');
+        return;
+    }
+    
+    childrenList.forEach(child => {
+        if (child && child.matricule) {
+            selector.innerHTML += `<option value="${child.matricule}">${child.fullName || 'Enfant'} - ${child.class || 'Classe'}</option>`;
+        }
+    });
+    
+    console.log(`✅ ${childrenList.length} enfant(s) ajouté(s) au sélecteur communiqués`);
+    
+    // Recharger les communiqués si nécessaire
+    if (typeof loadCommuniques === 'function') {
+        loadCommuniques();
+    }
+}
 
     document.getElementById('communique-child-selector').addEventListener('change', loadCommuniques);
     document.getElementById('communique-type-filter').addEventListener('change', loadCommuniques);
@@ -5861,35 +6042,88 @@ navigator.serviceWorker.addEventListener('message', (event) => {
 // ============================================
 // CONFIGURATION POUR TOUTES LES NOTIFICATIONS
 // ============================================
-async function setupAllNotifications() {
-  if (!currentParent || !childrenList.length) return;
-  
-  console.log('🔔 Configuration de TOUTES les notifications...');
-  
-  // INCIDENTS
-  setupIncidentNotifications();
-  
-  // PRÉSENCES
-  setupPresenceNotifications();
-  
-  // COTES ET NOTES
-  setupGradesNotifications();
-  
-  // DEVOIRS (tous niveaux)
-  setupHomeworkNotifications();
-  
-  // PAIEMENTS
-  setupPaymentNotifications();
-  
-  // COMMUNIQUÉS
-  setupCommuniqueNotifications();
-  
-  // EMPLOI DU TEMPS
-  setupTimetableNotifications();
-  
-  console.log('✅ Toutes les notifications configurées');
+// ============================================
+// CONFIGURATION NOTIFICATIONS CORRIGÉE
+// ============================================
+function setupAllNotifications() {
+    console.log('🔔 Configuration des notifications...');
+    
+    // Vérifier que tout est prêt
+    if (!currentParent) {
+        console.log('⏳ Parent non disponible, attente...');
+        setTimeout(setupAllNotifications, 1000);
+        return;
+    }
+    
+    if (!childrenList || childrenList.length === 0) {
+        console.log('⏳ Aucun enfant disponible, attente...');
+        setTimeout(setupAllNotifications, 1000);
+        return;
+    }
+    
+    console.log(`📋 ${childrenList.length} enfant(s) trouvé(s) pour les notifications`);
+    
+    try {
+        // Lancer tous les écouteurs de notifications
+        if (typeof setupIncidentNotifications === 'function') {
+            setupIncidentNotifications();
+            console.log('✅ Incidents configurés');
+        }
+        
+        if (typeof setupPresenceNotifications === 'function') {
+            setupPresenceNotifications();
+            console.log('✅ Présences configurées');
+        }
+        
+        if (typeof setupSecondaryGradesNotifications === 'function') {
+            setupSecondaryGradesNotifications();
+            console.log('✅ Notes secondaire configurées');
+        }
+        
+        if (typeof setupPrimaryGradesNotifications === 'function') {
+            setupPrimaryGradesNotifications();
+            console.log('✅ Notes primaire configurées');
+        }
+        
+        if (typeof setupKindergartenGradesNotifications === 'function') {
+            setupKindergartenGradesNotifications();
+            console.log('✅ Notes maternelle configurées');
+        }
+        
+        if (typeof setupHomeworkNotifications === 'function') {
+            setupHomeworkNotifications();
+            console.log('✅ Devoirs configurés');
+        }
+        
+        if (typeof setupKindergartenHomeworkNotifications === 'function') {
+            setupKindergartenHomeworkNotifications();
+            console.log('✅ Activités maternelle configurées');
+        }
+        
+        if (typeof setupPaymentNotifications === 'function') {
+            setupPaymentNotifications();
+            console.log('✅ Paiements configurés');
+        }
+        
+        if (typeof setupCommuniqueNotifications === 'function') {
+            setupCommuniqueNotifications();
+            console.log('✅ Communiqués configurés');
+        }
+        
+        if (typeof setupTimetableNotifications === 'function') {
+            setupTimetableNotifications();
+            console.log('✅ Emploi du temps configuré');
+        }
+        
+        console.log('✅ TOUTES LES NOTIFICATIONS CONFIGURÉES AVEC SUCCÈS');
+        
+        // Afficher un toast
+        showToast('Notifications activées', 'success');
+        
+    } catch (error) {
+        console.error('❌ Erreur configuration notifications:', error);
+    }
 }
-
 // ============================================
 // NOTIFICATIONS PRÉSENCES
 // ============================================
